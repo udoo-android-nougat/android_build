@@ -1077,10 +1077,12 @@ endif
 
 .PHONY: bootloader
 ifneq ($(strip $(TARGET_BOOTLOADER_CONFIG)),)
-BOOTLOADER_CROSS_TOOLCHAIN := `pwd`/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/bin/arm-linux-androideabi-
+BOOTLOADER_CROSS_TOOLCHAIN := `pwd`/prebuilts/gcc/linux-x86/arm/arm-eabi-6.x/bin/arm-eabi-
+BOOTLOADER_OUT := `pwd`/$(PRODUCT_OUT)/obj/UBOOT_OBJ
 BOOTLOADER_ENV := ARCH=arm CROSS_COMPILE=$(BOOTLOADER_CROSS_TOOLCHAIN)
+BOOTLOADER_ENV += $(TARGET_BOOTLOADER_ENV) O=$(BOOTLOADER_OUT)
 HOST_PROCESSOR := $(shell cat /proc/cpuinfo | grep processor | wc -l)
-TARGET_BOOTLOADER_IMAGE := $(PRODUCT_OUT)/u-boot.imx
+TARGET_BOOTLOADER_IMAGE := $(PRODUCT_OUT)/u-boot.$(TARGET_BOOTLOADER_POSTFIX)
 
 BOOTLOADER_PATH := bootable/bootloader/uboot-imx/
 BOOTLOADER_CONFIG_FILE := $(BOOTLOADER_PATH)/include/config.h
@@ -1091,13 +1093,16 @@ $(TARGET_BOOTLOADER_IMAGE):
 	for ubootplat in $(TARGET_BOOTLOADER_CONFIG); do \
 		UBOOT_PLATFORM=`echo $$ubootplat | cut -d':' -f1`; \
 		UBOOT_CONFIG=`echo $$ubootplat | cut -d':' -f2`; \
-		echo $(UBOOT_PLATFORM); \
-		echo $(UBOOT_CONFIG); \
 		$(MAKE) -C bootable/bootloader/uboot-imx/ distclean $(BOOTLOADER_ENV); \
 		$(MAKE) -C bootable/bootloader/uboot-imx/ $$UBOOT_CONFIG $(BOOTLOADER_ENV); \
 		$(MAKE) -C bootable/bootloader/uboot-imx/ $(BOOTLOADER_ENV); \
-		install -D bootable/bootloader/uboot-imx/u-boot.imx $(PRODUCT_OUT)/u-boot-$$UBOOT_PLATFORM.imx; \
-		install -D bootable/bootloader/uboot-imx/u-boot.imx $@; \
+		dd if=$(BOOTLOADER_OUT)/SPL of=$(PRODUCT_OUT)/u-boot.imx bs=1K seek=0 conv=notrunc; \
+		dd if=$(BOOTLOADER_OUT)/u-boot.img of=$(PRODUCT_OUT)/u-boot.imx bs=1K seek=68; \
+		install -D $(PRODUCT_OUT)/u-boot.$(TARGET_BOOTLOADER_POSTFIX) $(PRODUCT_OUT)/u-boot-$$UBOOT_PLATFORM.imx; \
+		if [ $(UBOOT_POST_PROCESS) = true ]; then \
+		echo "build post process" ; \
+		$(call build_uboot, $(TARGET_BOOTLOADER_POSTFIX), $$UBOOT_PLATFORM) \
+		fi \
 	done
 else
 bootloader:
@@ -1105,35 +1110,36 @@ endif
 
 .PHONY: kernelimage
 ifneq ($(strip $(TARGET_NO_KERNEL)),true)
-KERNEL_CROSS_TOOLCHAIN := `pwd`/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/bin/arm-linux-androideabi-
-KERNEL_CFLAGS := KCFLAGS=-mno-android
-KERNEL_ENV := ARCH=arm CROSS_COMPILE=$(KERNEL_CROSS_TOOLCHAIN) LOADADDR=$(LOAD_KERNEL_ENTRY) $(KERNEL_CFLAGS)
+KERNEL_OUT := $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ
+KERNEL_CROSS_TOOLCHAIN := `pwd`/prebuilts/gcc/linux-x86/arm/arm-eabi-6.x/bin/arm-eabi-
+#KERNEL_CFLAGS := KCFLAGS="-mno-android"
+KERNEL_ENV := ARCH=$(TARGET_ARCH) CROSS_COMPILE=$(KERNEL_CROSS_TOOLCHAIN) LOADADDR=$(LOAD_KERNEL_ENTRY) $(KERNEL_CFLAGS) O=`pwd`/$(KERNEL_OUT)
 HOST_PROCESSOR := $(shell cat /proc/cpuinfo | grep processor | wc -l)
 INSTALLED_KERNEL_TARGET := $(PRODUCT_OUT)/kernel
 TARGET_PREBUILT_KERNEL := $(PRODUCT_OUT)/kernel
-KERNEL_CONFIGURE := kernel_imx/.config
-TARGET_KERNEL_CONFIGURE := $(PRODUCT_OUT)/.config
-KERNEL_ZIMAGE    := kernel_imx/arch/arm/boot/zImage
-KERNEL_OUT := $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ
+KERNEL_CONFIGURE := kernel/.config
+TARGET_KERNEL_CONFIGURE := $(KERNEL_OUT)/.config
+KERNEL_ZIMAGE := $(KERNEL_OUT)/arch/arm/boot/zImage
 
 
 .PHONY: $(TARGET_PREBUILT_KERNEL)
 kernelimage: $(TARGET_PREBUILT_KERNEL)
 
-$(KERNEL_CONFIGURE): kernel_imx/arch/arm/configs/$(TARGET_KERNEL_DEFCONF)
+$(KERNEL_CONFIGURE): kernel/arch/$(TARGET_ARCH)/configs/$(TARGET_KERNEL_DEFCONF)
 
-$(TARGET_KERNEL_CONFIGURE): kernel_imx/arch/arm/configs/$(TARGET_KERNEL_DEFCONF) $(KERNEL_CONFIGURE)
-	$(MAKE) -C kernel_imx $(TARGET_KERNEL_DEFCONF) $(KERNEL_ENV)
-	install -D $(KERNEL_CONFIGURE) $(TARGET_KERNEL_CONFIGURE)
+$(TARGET_KERNEL_CONFIGURE): kernel/arch/$(TARGET_ARCH)/configs/$(TARGET_KERNEL_DEFCONF) $(KERNEL_CONFIGURE)
+	rm -f $(PRODUCT_OUT)/kernel
+	mkdir -p $(KERNEL_OUT)
+	$(MAKE) -C kernel $(TARGET_KERNEL_DEFCONF) $(KERNEL_ENV)
 
 $(TARGET_PREBUILT_KERNEL): $(TARGET_KERNEL_CONFIGURE)
-	$(MAKE) -C kernel_imx -j$(HOST_PROCESSOR) uImage $(KERNEL_ENV)
-	$(MAKE) -C kernel_imx dtbs $(KERNEL_ENV)
+	$(MAKE) -C kernel zImage -j$(HOST_PROCESSOR) $(KERNEL_ENV)
+	$(MAKE) -C kernel $(TARGET_BOARD_DTS_FILES) $(KERNEL_ENV)
 	install -D $(KERNEL_ZIMAGE)  $(PRODUCT_OUT)/kernel
 	for dtsplat in $(TARGET_BOARD_DTS_CONFIG); do \
 		DTS_PLATFORM=`echo $$dtsplat | cut -d':' -f1`; \
 		DTS_BOARD=`echo $$dtsplat | cut -d':' -f2`; \
-		install -D kernel_imx/arch/arm/boot/dts/$$DTS_BOARD $(PRODUCT_OUT)/$$DTS_BOARD; \
+		install -D $(KERNEL_OUT)/arch/$(TARGET_ARCH)/boot/dts/$$DTS_BOARD $(PRODUCT_OUT)/$$DTS_BOARD; \
 	done
 else
 kernelimage:
@@ -1153,14 +1159,14 @@ $(eval kernel_modules_dest_list += $(call append-path,$(PRODUCT_OUT),$(_dest))))
 ifneq ($(strip $(kernel_modules_src_list)),)
 
 kernelmodules: $(TARGET_PREBUILT_KERNEL) | $(ACP)
-	$(MAKE) -C kernel_imx modules $(KERNEL_ENV)
+	$(MAKE) -C kernel modules $(KERNEL_ENV)
 	$(hide) $(foreach cf, $(TARGET_KERNEL_MODULES),				\
 	$(eval _src := $(call word-colon,1,$(cf)))				\
 	$(eval _dest := $(call word-colon,2,$(cf)))				\
 	$(eval _full_dest := $(call append-path,$(PRODUCT_OUT),$(_dest)))	\
 	$(eval _dest_dir := $(call dir, $(_full_dest))) 			\
-	mkdir -p $(_dest_dir); 							\
-	$(ACP) $(_src) $(_full_dest);						\
+	mkdir -p `dirname $(_full_dest)`; 							\
+	$(ACP) $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/$(_src) $(_full_dest);				\
 	)
 	@echo "install kernel modules: $(kernel_modules_src_list)"
 else
